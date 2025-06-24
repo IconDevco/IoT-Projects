@@ -4,6 +4,7 @@
 #include <ESPAsyncWebServer.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <DNSServer.h>
 
 AsyncWebServer server(80);
 Preferences prefs;
@@ -63,26 +64,29 @@ Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // Simulated start time
 int hour = 12;
-int minute = 30;
+int minute = 0;
 int prev_minute_pos = -1;
 int prev_hour_pos = -1;
 unsigned long lastUpdate = 0;
 const unsigned long interval = 60000; 
 
+const byte DNS_PORT = 53;
+DNSServer dnsServer;
+
+bool timeIsSet = (hour >= 0 && hour < 24) && (minute >= 0 && minute < 60);
+
 void setup() {
+
+//prefs.begin("mklock", false);
+//prefs.clear();
+//prefs.end();
+
 
   strip.begin();
   strip.setBrightness(BRIGHTNESS);
   strip.show();
 
   Serial.begin(115200);
-
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP("MKlock_Setup");
-
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(IP); // Should be 192.168.4.1
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send_P(200, "text/html", setup_page);
@@ -91,8 +95,8 @@ void setup() {
  prefs.begin("mklock", true);
 String ssid = prefs.getString("ssid", "");
 String password = prefs.getString("password", "");
-hour = prefs.getInt("hour", 12);
-minute = prefs.getInt("minute", 30);
+hour = prefs.getInt("hour", -1);
+minute = prefs.getInt("minute", -1);
 prefs.end();
 
 if (ssid != "") {
@@ -109,7 +113,12 @@ if (ssid != "") {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi connected, syncing time.");
-    configTime(-25200, 0, "pool.ntp.org"); // update with your UTC offset
+
+  //setenv("TZ", "PST8PDT,M3.2.0,M11.1.0", 1);  // Pacific Time with DST rules
+  //tzset();
+
+  //configTime(0, 0, "pool.ntp.org");  // UTC input, local time auto-adjusted
+    //configTime(-25200, 0, "pool.ntp.org"); // update with your UTC offset
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
       hour = timeinfo.tm_hour;
@@ -124,13 +133,24 @@ if (ssid != "") {
 // Wi-Fi failed or credentials not set — start setup mode
 WiFi.mode(WIFI_AP);
 WiFi.softAP("MKlock_Setup");
+
 Serial.println("Started access point for configuration.");
 IPAddress apIP = WiFi.softAPIP();
 Serial.println(apIP);
- 
+
+dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+Serial.println("DNS server started — all domains redirect to MKlock");
+
+
+server.begin();
 
 server.on("/submit", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+        if (data == nullptr || len == 0) {
+      Serial.println("No data received in POST.");
+      request->send(400, "text/plain", "No data received");
+      return;
+    }
     // Parse incoming body as JSON
     StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, data, len);
@@ -141,8 +161,8 @@ server.on("/submit", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
       return;
     }
 
-    int hour = doc["hour"] | 6;
-    int minute = doc["minute"] | 30;
+     hour = doc["hour"] | -1;
+     minute = doc["minute"] | -1;
     String ssid = doc["ssid"] | "";
     String password = doc["password"] | "";
 
@@ -160,12 +180,28 @@ server.on("/submit", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
     request->send(200, "text/plain", "Time & Wi-Fi saved");
 
     delay(1000);
+    Serial.printf("Storing: %02d:%02d\n", hour, minute);
     ESP.restart();
 });
-//server.begin(); uncomment this to fuck everything up
+
+
+// Setup mode: pulse LED 0 while idle (basic visual cue)
+
+if (WiFi.getMode() == WIFI_AP) {
+  for (int i = 0; i <= 255; i += 5) {
+      strip.setPixelColor(0, 0, 0, i); // fade in blue
+  strip.show();
+  delay(10);
+  }
+  for (int i = 255; i >= 0; i -= 5){
+      strip.setPixelColor(0, 0, 0, i); // fade out blue
+  strip.show();
+  delay(10);
+  }
 }
 
-
+server.begin(); 
+}
 
 
 int rotate(int index) {
@@ -209,9 +245,24 @@ void fadeHands(int fromHour, int toHour, int fromMin, int toMin) {
   strip.show();
 }
 
-void loop() {
-  unsigned long now = millis();
 
+
+void loop() {
+  
+   // prefs.begin("mklock", true);
+  //int hour = prefs.getInt("hour", -1);
+  //prefs.end();
+
+
+
+dnsServer.processNextRequest();
+
+if (hour < 0) {
+animateSetupScroll();
+    return;
+  }
+
+    unsigned long now = millis();
 
   if (millis() - lastUpdate >= interval) {
     lastUpdate = millis();
@@ -222,7 +273,6 @@ void loop() {
     }
     Serial.printf("Time: %02d:%02d\n", hour, minute);
   }
-
     // Calculate LED positions
     int minute_led = int(minute * (36.0 / 60.0)); // 0–35
     int minute_pos = rotate(minute_led);
@@ -244,5 +294,25 @@ void loop() {
     prev_hour_pos = hour_pos;
     prev_minute_pos = minute_pos;
 
+  
+}
 
+const int tailLength = 36;  // number of trailing pixels
+const int trailDecay = 12; // brightness decrease per pixel
+
+void animateSetupScroll() {
+  static int pos = 0;
+
+  strip.clear();
+
+  for (int i = 0; i < tailLength; i++) {
+    int pixelIndex = (pos - i + NUM_LEDS) % NUM_LEDS;
+    int brightness = 80 - (i * trailDecay);
+    if (brightness < 0) brightness = 0;
+    strip.setPixelColor(pixelIndex, strip.Color(0, 0, brightness));
   }
+
+  strip.show();
+  delay(50);
+  pos = (pos + 1) % NUM_LEDS;
+}
