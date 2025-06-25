@@ -14,44 +14,40 @@ const char* setup_page = R"rawliteral(
 <html>
 <head><title>MKlock Setup</title></head>
 <body style="font-family: sans-serif; text-align: center;">
-  <h2>Welcome to MKlock!</h2>
-  <p id="status">Grabbing your current time…</p>
-  <form id="setupForm">
-    <p><input name="ssid" placeholder="Wi-Fi Network" required></p>
-    <p><input name="password" placeholder="Wi-Fi Password" type="password" required></p>
-    <input type="hidden" name="hour">
-    <input type="hidden" name="minute">
-    <p><button type="submit">Submit & Sync Clock</button></p>
-  </form>
+
+  <h2>MKlock is Syncing</h2>
+  <p id="status">Grabbing your current time and syncing to the clock</p>
 
 <script>
-  const form = document.getElementById("setupForm");
-  const hourField = form.querySelector("input[name='hour']");
-  const minuteField = form.querySelector("input[name='minute']");
-  const status = document.getElementById("status");
+  window.addEventListener("DOMContentLoaded", async () => {
+    const now = new Date();
+    const hour = now.getHours();
+    const minute = now.getMinutes();
 
-  const now = new Date();
-  const hour = now.getHours();
-  const minute = now.getMinutes();
-  hourField.value = hour;
-  minuteField.value = minute;
-  status.innerText = `Detected time: ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+    const payload = {
+      hour,
+      minute,
+    };
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const data = new FormData(form);
-    const payload = Object.fromEntries(data.entries());
+    try {
+      const res = await fetch("/time-sync", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
 
-    const res = await fetch("/submit", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload)
-    });
-
-    status.innerText = "Clock set! You may now reconnect to your usual Wi-Fi.";
-    form.remove();
+      if (res.ok) {
+        document.getElementById("status").innerText = 
+          `Clock set to ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')} — you're good to go!`;
+      } else {
+        document.getElementById("status").innerText = "Failed to sync time.";
+      }
+    } catch (err) {
+      document.getElementById("status").innerText = "Error sending time. Try reconnecting.";
+    }
   });
 </script>
+
 </body>
 </html>
 )rawliteral";
@@ -59,6 +55,7 @@ const char* setup_page = R"rawliteral(
 #define LED_PIN     10
 #define NUM_LEDS    36
 #define BRIGHTNESS  125
+#define POT_PIN    A0
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -93,42 +90,10 @@ void setup() {
   });
 
  prefs.begin("mklock", true);
-String ssid = prefs.getString("ssid", "");
-String password = prefs.getString("password", "");
 hour = prefs.getInt("hour", -1);
 minute = prefs.getInt("minute", -1);
 prefs.end();
 
-if (ssid != "") {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid.c_str(), password.c_str());
-  Serial.print("Connecting to WiFi");
-
-  unsigned long wifiTimeout = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiTimeout < 5000) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected, syncing time.");
-
-  //setenv("TZ", "PST8PDT,M3.2.0,M11.1.0", 1);  // Pacific Time with DST rules
-  //tzset();
-
-  //configTime(0, 0, "pool.ntp.org");  // UTC input, local time auto-adjusted
-    //configTime(-25200, 0, "pool.ntp.org"); // update with your UTC offset
-    struct tm timeinfo;
-    if (getLocalTime(&timeinfo)) {
-      hour = timeinfo.tm_hour;
-      minute = timeinfo.tm_min;
-    } else {
-      Serial.println("NTP failed — using last saved or default time.");
-    }
-    return; // all good — exit setup()
-  }
-}
 
 // Wi-Fi failed or credentials not set — start setup mode
 WiFi.mode(WIFI_AP);
@@ -144,7 +109,7 @@ Serial.println("DNS server started — all domains redirect to MKlock");
 
 server.begin();
 
-server.on("/submit", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+server.on("/time-sync", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
   [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (data == nullptr || len == 0) {
       Serial.println("No data received in POST.");
@@ -163,18 +128,14 @@ server.on("/submit", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
 
      hour = doc["hour"] | -1;
      minute = doc["minute"] | -1;
-    String ssid = doc["ssid"] | "";
-    String password = doc["password"] | "";
 
-    Serial.printf("Received time: %02d:%02d, SSID: %s\n", hour, minute, ssid.c_str());
+
 
     // Save to preferences
     prefs.begin("mklock", false);
     prefs.clear();
     prefs.putInt("hour", hour);
     prefs.putInt("minute", minute);
-    prefs.putString("ssid", ssid);
-    prefs.putString("password", password);
     prefs.end();
 
     request->send(200, "text/plain", "Time & Wi-Fi saved");
@@ -201,8 +162,11 @@ if (WiFi.getMode() == WIFI_AP) {
 }
 
 server.begin(); 
-}
 
+WiFi.softAPdisconnect(true);
+WiFi.mode(WIFI_OFF);
+}
+int potBrightness = -1;
 
 int rotate(int index) {
   // Adjust so LED 0 is at 6:00, LED 18 is 12:00
@@ -213,8 +177,8 @@ void fadeHands(int fromHour, int toHour, int fromMin, int toMin) {
   const int fade_steps = 10;
 
   // Get starting and ending colors
-  uint32_t fromHourColor = strip.getPixelColor(fromHour);
-  uint32_t fromMinColor  = strip.getPixelColor(fromMin);
+  uint32_t fromHourColor = strip.getPixelColor(fromHour * potBrightness);
+  uint32_t fromMinColor  = strip.getPixelColor(fromMin * potBrightness);
 
   for (int i = 0; i <= fade_steps; i++) {
     float t = i / float(fade_steps);
@@ -253,7 +217,8 @@ void loop() {
   //int hour = prefs.getInt("hour", -1);
   //prefs.end();
 
-
+  int potValue = analogRead(POT_PIN);
+potBrightness = map(potValue, 0, 1023, 0, 255);
 
 dnsServer.processNextRequest();
 
@@ -309,7 +274,7 @@ void animateSetupScroll() {
     int pixelIndex = (pos - i + NUM_LEDS) % NUM_LEDS;
     int brightness = 80 - (i * trailDecay);
     if (brightness < 0) brightness = 0;
-    strip.setPixelColor(pixelIndex, strip.Color(0, 0, brightness));
+    strip.setPixelColor(pixelIndex, strip.Color(brightness, brightness, brightness));
   }
 
   strip.show();
