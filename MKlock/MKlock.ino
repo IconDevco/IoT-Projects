@@ -5,18 +5,22 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
+#include <RTCLib.h>
+
 
 AsyncWebServer server(80);
 Preferences prefs;
+RTC_DS3231 rtc;
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 const char* setup_page = R"rawliteral(
 <!DOCTYPE html>
 <html>
-<head><title>MKlock Setup</title></head>
+<head><title>MSL Setup</title></head>
 <body style="font-family: sans-serif; text-align: center;">
 
-  <h2>MKlock is Syncing</h2>
-  <p id="status">Grabbing your current time and syncing to the clock</p>
+  <h2>Access data recieved</h2>
+  <p id="status">RC Access for connected deviced</p>
 
 <script>
   window.addEventListener("DOMContentLoaded", async () => {
@@ -38,12 +42,12 @@ const char* setup_page = R"rawliteral(
 
       if (res.ok) {
         document.getElementById("status").innerText = 
-          `Clock set to ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')} — you're good to go!`;
+        `data set point`;  //`Clock set to ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')} — you're good to go!`;
       } else {
-        document.getElementById("status").innerText = "Failed to sync time.";
+        document.getElementById("status").innerText = "Failed to access.";
       }
     } catch (err) {
-      document.getElementById("status").innerText = "Error sending time. Try reconnecting.";
+      document.getElementById("status").innerText = "Error sending. Try reconnecting.";
     }
   });
 </script>
@@ -57,11 +61,8 @@ const char* setup_page = R"rawliteral(
 #define BRIGHTNESS  125
 #define POT_PIN    A0
 
-Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
-
 // Simulated start time
-int hour = 12;
-int minute = 0;
+
 int prev_minute_pos = -1;
 int prev_hour_pos = -1;
 unsigned long lastUpdate = 0;
@@ -70,14 +71,30 @@ const unsigned long interval = 60000;
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
 
-bool timeIsSet = (hour >= 0 && hour < 24) && (minute >= 0 && minute < 60);
+bool clockConfigured = false;
+bool clearClockConfigDebug = false;
 
 void setup() {
 
-//prefs.begin("mklock", false);
-//prefs.clear();
-//prefs.end();
+if(clearClockConfigDebug){
+prefs.begin("mklock", false);
+prefs.clear();
+prefs.end();
+ESP.restart();
+}
 
+
+Wire.begin();  // optional if using default pins (21, 22)
+
+if (!rtc.begin()) {
+  Serial.println("Couldn't find RTC");
+  while (1);
+}
+
+if (rtc.lostPower()) {
+  Serial.println("RTC lost power, setting time to compile time");
+  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));  // Sets it to sketch compile time
+}
 
   strip.begin();
   strip.setBrightness(BRIGHTNESS);
@@ -89,15 +106,16 @@ void setup() {
     request->send_P(200, "text/html", setup_page);
   });
 
- prefs.begin("mklock", true);
+prefs.begin("mklock", true);
 hour = prefs.getInt("hour", -1);
 minute = prefs.getInt("minute", -1);
+bool configured = prefs.getBool("configured", false);
+clockConfigured = configured;
 prefs.end();
-
 
 // Wi-Fi failed or credentials not set — start setup mode
 WiFi.mode(WIFI_AP);
-WiFi.softAP("MKlock_Setup");
+WiFi.softAP("Portable Reactor Interface");
 
 Serial.println("Started access point for configuration.");
 IPAddress apIP = WiFi.softAPIP();
@@ -105,7 +123,6 @@ Serial.println(apIP);
 
 dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
 Serial.println("DNS server started — all domains redirect to MKlock");
-
 
 server.begin();
 
@@ -129,20 +146,21 @@ server.on("/time-sync", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
      hour = doc["hour"] | -1;
      minute = doc["minute"] | -1;
 
-
-
-    // Save to preferences
-    prefs.begin("mklock", false);
-    prefs.clear();
-    prefs.putInt("hour", hour);
-    prefs.putInt("minute", minute);
-    prefs.end();
-
     request->send(200, "text/plain", "Time & Wi-Fi saved");
-
     delay(1000);
     Serial.printf("Storing: %02d:%02d\n", hour, minute);
+   
+   prefs.putBool("configured", true);
+   prefs.end();
+
+   celebrateConfigured();   // Add this
+   delay(200);
+
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+
     ESP.restart();
+
 });
 
 
@@ -161,12 +179,12 @@ if (WiFi.getMode() == WIFI_AP) {
   }
 }
 
-server.begin(); 
+//server.begin(); 
 
 WiFi.softAPdisconnect(true);
 WiFi.mode(WIFI_OFF);
 }
-int potBrightness = -1;
+//int potBrightness = -1;
 
 int rotate(int index) {
   // Adjust so LED 0 is at 6:00, LED 18 is 12:00
@@ -177,8 +195,8 @@ void fadeHands(int fromHour, int toHour, int fromMin, int toMin) {
   const int fade_steps = 10;
 
   // Get starting and ending colors
-  uint32_t fromHourColor = strip.getPixelColor(fromHour * potBrightness);
-  uint32_t fromMinColor  = strip.getPixelColor(fromMin * potBrightness);
+  uint32_t fromHourColor = strip.getPixelColor(fromHour);// * potBrightness);
+  uint32_t fromMinColor  = strip.getPixelColor(fromMin);// * potBrightness);
 
   for (int i = 0; i <= fade_steps; i++) {
     float t = i / float(fade_steps);
@@ -217,25 +235,22 @@ void loop() {
   //int hour = prefs.getInt("hour", -1);
   //prefs.end();
 
-  int potValue = analogRead(POT_PIN);
-potBrightness = map(potValue, 0, 1023, 0, 255);
+ // int potValue = analogRead(POT_PIN);
+//potBrightness = map(potValue, 0, 1023, 0, 255);
 
 dnsServer.processNextRequest();
 
-if (hour < 0) {
+
+DateTime now = rtc.now();
+hour = now.hour();
+minute = now.minute();
+
+
+if (!clockConfigured) {
 animateSetupScroll();
     return;
   }
 
-    unsigned long now = millis();
-
-  if (millis() - lastUpdate >= interval) {
-    lastUpdate = millis();
-    minute++;
-    if (minute >= 60) {
-      minute = 0;
-      hour = (hour + 1) % 24;
-    }
     Serial.printf("Time: %02d:%02d\n", hour, minute);
   }
     // Calculate LED positions
