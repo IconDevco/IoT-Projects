@@ -5,13 +5,13 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
-#include <RTCLib.h>
+#include <RTClib.h>
 
 
 AsyncWebServer server(80);
 Preferences prefs;
 RTC_DS3231 rtc;
-Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
 
 const char* setup_page = R"rawliteral(
 <!DOCTYPE html>
@@ -56,10 +56,10 @@ const char* setup_page = R"rawliteral(
 </html>
 )rawliteral";
 
-#define LED_PIN     10
+#define LED_PIN     2
 #define NUM_LEDS    36
 #define BRIGHTNESS  125
-#define POT_PIN    A0
+//#define POT_PIN    A0
 
 // Simulated start time
 
@@ -72,117 +72,129 @@ const byte DNS_PORT = 53;
 DNSServer dnsServer;
 
 bool clockConfigured = false;
-bool clearClockConfigDebug = false;
+//bool clearClockConfigDebug = true;
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+int hour;
+int minute;
+
+bool isRtcConnected = false;
 
 void setup() {
+Serial.begin(115200);
+  delay(1000);
+  Serial.println("Boot OK");
+/*
+  if(clearClockConfigDebug){
+    prefs.begin("mklock", false);
+    prefs.clear();
+    prefs.end();
+    ESP.restart();
+  }
+*/
+  Wire.begin(8, 9);
 
-if(clearClockConfigDebug){
-prefs.begin("mklock", false);
-prefs.clear();
-prefs.end();
-ESP.restart();
-}
+ Serial.println("Scanning I2C bus...");
+
+  byte count = 0;
+  for (byte address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("Found device at 0x");
+      Serial.println(address, HEX);
+      count++;
+    }
+  }
+
+  if (count == 0) Serial.println("No I2C devices found.");
+  else Serial.println("Scan complete.");
 
 
-Wire.begin();  // optional if using default pins (21, 22)
+  if (!rtc.begin()) {
+    isRtcConnected = false;
+    Serial.println("Couldn't find RTC");
+  } else isRtcConnected = true;
 
-if (!rtc.begin()) {
-  Serial.println("Couldn't find RTC");
-  while (1);
-}
-
-if (rtc.lostPower()) {
-  Serial.println("RTC lost power, setting time to compile time");
-  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));  // Sets it to sketch compile time
-}
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power, setting time to compile time");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));  // Sets it to sketch compile time
+  }
 
   strip.begin();
   strip.setBrightness(BRIGHTNESS);
   strip.show();
 
-  Serial.begin(115200);
+  
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send_P(200, "text/html", setup_page);
   });
 
-prefs.begin("mklock", true);
-hour = prefs.getInt("hour", -1);
-minute = prefs.getInt("minute", -1);
-bool configured = prefs.getBool("configured", false);
-clockConfigured = configured;
-prefs.end();
+  prefs.begin("mklock", true);
+  hour = prefs.getInt("hour", -1);
+  minute = prefs.getInt("minute", -1);
+  bool configured = prefs.getBool("configured", false);
+  clockConfigured = configured;
+  prefs.end();
 
 // Wi-Fi failed or credentials not set — start setup mode
-WiFi.mode(WIFI_AP);
-WiFi.softAP("Portable Reactor Interface");
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("Portable Reactor Interface");
 
-Serial.println("Started access point for configuration.");
-IPAddress apIP = WiFi.softAPIP();
-Serial.println(apIP);
+  Serial.println("Started access point for configuration.");
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.println(apIP);
 
-dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
-Serial.println("DNS server started — all domains redirect to MKlock");
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+  Serial.println("DNS server started — all domains redirect to MKlock");
 
-server.begin();
+  server.begin();
 
-server.on("/time-sync", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
-  [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-        if (data == nullptr || len == 0) {
-      Serial.println("No data received in POST.");
-      request->send(400, "text/plain", "No data received");
-      return;
-    }
-    // Parse incoming body as JSON
-    StaticJsonDocument<512> doc;
-    DeserializationError error = deserializeJson(doc, data, len);
-    if (error) {
-      Serial.print("JSON parse error: ");
-      Serial.println(error.c_str());
-      request->send(400, "text/plain", "Invalid JSON");
-      return;
-    }
+  server.on("/time-sync", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+          if (data == nullptr || len == 0) {
+        Serial.println("No data received in POST.");
+        request->send(400, "text/plain", "No data received");
+        return;
+      }
+      
+      // Parse incoming body as JSON
+      StaticJsonDocument<512> doc;
+      DeserializationError error = deserializeJson(doc, data, len);
+      
+      if (error) {
+        Serial.print("JSON parse error: ");
+        Serial.println(error.c_str());
+        request->send(400, "text/plain", "Invalid JSON");
+        return;
+      }
 
-     hour = doc["hour"] | -1;
-     minute = doc["minute"] | -1;
+      hour = doc["hour"] | -1;
+      minute = doc["minute"] | -1;
 
-    request->send(200, "text/plain", "Time & Wi-Fi saved");
-    delay(1000);
-    Serial.printf("Storing: %02d:%02d\n", hour, minute);
+      request->send(200, "text/plain", "Time & Wi-Fi saved");
+      delay(1000);
+      Serial.printf("Storing: %02d:%02d\n", hour, minute);
    
-   prefs.putBool("configured", true);
+      prefs.putBool("configured", true);
    prefs.end();
 
    celebrateConfigured();   // Add this
    delay(200);
 
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_OFF);
+   WiFi.softAPdisconnect(true);
+   WiFi.mode(WIFI_OFF);
 
-    ESP.restart();
+   ESP.restart();
 
-});
-
-
-// Setup mode: pulse LED 0 while idle (basic visual cue)
-
-if (WiFi.getMode() == WIFI_AP) {
-  for (int i = 0; i <= 255; i += 5) {
-      strip.setPixelColor(0, 0, 0, i); // fade in blue
-  strip.show();
-  delay(10);
-  }
-  for (int i = 255; i >= 0; i -= 5){
-      strip.setPixelColor(0, 0, 0, i); // fade out blue
-  strip.show();
-  delay(10);
-  }
-}
+  });
 
 //server.begin(); 
-
-WiFi.softAPdisconnect(true);
-WiFi.mode(WIFI_OFF);
+  if (clockConfigured) {
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
 }
 //int potBrightness = -1;
 
@@ -231,54 +243,47 @@ void fadeHands(int fromHour, int toHour, int fromMin, int toMin) {
 
 void loop() {
   
-   // prefs.begin("mklock", true);
-  //int hour = prefs.getInt("hour", -1);
-  //prefs.end();
+  dnsServer.processNextRequest();
 
- // int potValue = analogRead(POT_PIN);
-//potBrightness = map(potValue, 0, 1023, 0, 255);
+  if (isRtcConnected) {
+    DateTime now = rtc.now();
+    hour = now.hour();
+    minute = now.minute();
+  }
 
-dnsServer.processNextRequest();
-
-
-DateTime now = rtc.now();
-hour = now.hour();
-minute = now.minute();
-
-
-if (!clockConfigured) {
-animateSetupScroll();
+  if (!clockConfigured) {
+    animateSetupScroll();
     return;
   }
 
-    Serial.printf("Time: %02d:%02d\n", hour, minute);
-  }
-    // Calculate LED positions
-    int minute_led = int(minute * (36.0 / 60.0)); // 0–35
-    int minute_pos = rotate(minute_led);
+  Serial.printf("Time: %02d:%02d\n", hour, minute);
 
-    float hour_raw = (hour % 12) * 3.0 + (minute / 20.0); // 3 LEDs per hour
-    int hour_led = int(hour_raw) % NUM_LEDS;
-    int hour_pos = rotate(hour_led);
+  // Calculate LED positions
+  int minute_led = int(minute * (36.0 / 60.0)); // 0–35
+  int minute_pos = rotate(minute_led);
 
-    // First run? Skip fade
-    if (prev_hour_pos == -1 || prev_minute_pos == -1) {
-      strip.clear();
-      strip.setPixelColor(hour_pos, strip.Color(255, 0, 0));
-      strip.setPixelColor(minute_pos, strip.Color(0, 0, 255));
-      strip.show();
-    } else {
+  float hour_raw = (hour % 12) * 3.0 + (minute / 20.0); // 3 LEDs per hour
+  int hour_led = int(hour_raw) % NUM_LEDS;
+  int hour_pos = rotate(hour_led);
+
+  // First run? Skip fade
+  if (prev_hour_pos == -1 || prev_minute_pos == -1) {
+    strip.clear();
+    strip.setPixelColor(hour_pos, strip.Color(255, 0, 0));
+    strip.setPixelColor(minute_pos, strip.Color(0, 0, 255));
+    strip.show();
+    } 
+    else {
       fadeHands(prev_hour_pos, hour_pos, prev_minute_pos, minute_pos);
-    }
+    } 
 
     prev_hour_pos = hour_pos;
     prev_minute_pos = minute_pos;
 
-  
 }
 
 const int tailLength = 36;  // number of trailing pixels
-const int trailDecay = 12; // brightness decrease per pixel
+const int trailDecay = 5; // brightness decrease per pixel
 
 void animateSetupScroll() {
   static int pos = 0;
@@ -295,4 +300,20 @@ void animateSetupScroll() {
   strip.show();
   delay(50);
   pos = (pos + 1) % NUM_LEDS;
+}
+
+void celebrateConfigured() {
+  for (int round = 0; round < 2; round++) {
+    // Light all LEDs green
+    for (int i = 0; i < NUM_LEDS; i++) {
+      strip.setPixelColor(i, strip.Color(0, 200, 0));
+    }
+    strip.show();
+    delay(150);
+
+    // Turn off
+    strip.clear();
+    strip.show();
+    delay(100);
+  }
 }
