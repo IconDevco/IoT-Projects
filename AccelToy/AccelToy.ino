@@ -30,6 +30,7 @@ const int CIRCLE_RADIUS = 120;
 const int CIRCLE_CENTER_X = SCREEN_WIDTH / 2;
 const int CIRCLE_CENTER_Y = SCREEN_HEIGHT / 2;
 
+const int SPAWN_CHANCE = 15; //higher chance  
 const int NUM_BALLS = 16;
 const float GRAVITY = 0.98;
 const float DAMPING = 0.95;
@@ -188,7 +189,7 @@ void updateBall(int i) {
       }
 
       // Randomly trigger despawn
-      if (random(10000) < 50) { // ~0.05% chance per frame
+      if (random(10000) < SPAWN_CHANCE) { // ~0.05% chance per frame
         ball.state = DESPAWNING;
         ball.stateStartTime = now;
         ball.targetSize = ball.size;
@@ -200,8 +201,11 @@ case DESPAWNING: {
   ball.size -= 0.5;
   if (ball.size <= 0) {
     // Teleport and start spawning
-    ball.x = random(CIRCLE_CENTER_X - CIRCLE_RADIUS + 10, CIRCLE_CENTER_X + CIRCLE_RADIUS - 10);
-    ball.y = random(CIRCLE_CENTER_Y - CIRCLE_RADIUS + 10, CIRCLE_CENTER_Y + CIRCLE_RADIUS - 10);
+float angle = random(0, 360) * DEG_TO_RAD;
+float radius = sqrt(random(0, 10001) / 10000.0) * (CIRCLE_RADIUS - 10);
+ball.x = CIRCLE_CENTER_X + cos(angle) * radius;
+ball.y = CIRCLE_CENTER_Y + sin(angle) * radius;
+
     ball.vx = random(-30, 30) / 10.0;
     ball.vy = random(-20, 5) / 10.0;
     ball.state = SPAWNING;
@@ -296,6 +300,7 @@ void drawBallToBuffer(int i) {
 }
 
 void drawBoundaryCircle() {
+  return;
   for (int angle = 0; angle < 360; angle++) {
     float rad = radians(angle);
     int x = CIRCLE_CENTER_X + cos(rad) * CIRCLE_RADIUS;
