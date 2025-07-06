@@ -21,7 +21,7 @@
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
 // === MPU6050 Setup ===
-Adafruit_MPU6050 mpu;;
+Adafruit_MPU6050 mpu;
 
 // === Screen and Physics Settings ===
 const int SCREEN_WIDTH = 240;
@@ -33,16 +33,20 @@ const int CIRCLE_CENTER_Y = SCREEN_HEIGHT / 2;
 const int NUM_BALLS = 16;
 const float GRAVITY = 0.98;
 const float DAMPING = 0.95;
-const float BOUNCE_DAMPING = 0.98;
+const float BOUNCE_DAMPING = 0.85;
 const float SHAKE_THRESHOLD = 2.5;
 
-// === Ball Structure ===
+enum BallState { ACTIVE, DESPAWNING, SPAWNING };
+
 struct Ball {
   float x, y;
   float vx, vy;
   float gx, gy;
   uint16_t color;
   float size;
+  float targetSize;
+  BallState state;
+  unsigned long stateStartTime;
 };
 
 Ball balls[NUM_BALLS];
@@ -73,7 +77,7 @@ void setup() {
   Serial.println("MPU6050 ready");
 
   // Initialize SPI and display
-  SPI.begin(TFT_SCLK, -1, TFT_MOSI, -1);  // ESP32 only
+  SPI.begin(TFT_SCLK, -1, TFT_MOSI, -1);
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
 
@@ -92,6 +96,8 @@ void setup() {
     balls[i].size = random(4, 12);
     balls[i].gx = 0;
     balls[i].gy = GRAVITY;
+    balls[i].state = ACTIVE;
+balls[i].stateStartTime = millis();
   }
 }
 
@@ -107,7 +113,7 @@ void loop() {
   }
 
   tft.drawRGBBitmap(0, 0, frameBuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
-  delay(20); // ~50 FPS
+  delay(12); // ~50 FPS
 }
 
 void updateGravityFromMPU() {
@@ -152,37 +158,76 @@ void shakeBalls() {
 void updateBall(int i) {
   Ball &ball = balls[i];
 
-  ball.vx += ball.gx;
-  ball.vy += ball.gy;
+  unsigned long now = millis();
 
-  ball.vx *= DAMPING;
-  ball.vy *= DAMPING;
+  switch (ball.state) {
+    case ACTIVE:{
+      // Normal physics
+      ball.vx += ball.gx;
+      ball.vy += ball.gy;
+      ball.vx *= DAMPING;
+      ball.vy *= DAMPING;
+      ball.x += ball.vx;
+      ball.y += ball.vy;
 
-  ball.x += ball.vx;
-  ball.y += ball.vy;
+      // Bounce off circular boundary
+      float dx = ball.x - CIRCLE_CENTER_X;
+      float dy = ball.y - CIRCLE_CENTER_Y;
+      float dist = sqrt(dx * dx + dy * dy);
+      if (dist + ball.size > CIRCLE_RADIUS) {
+        float nx = dx / dist;
+        float ny = dy / dist;
+        float overlap = (dist + ball.size) - CIRCLE_RADIUS;
+        ball.x -= nx * overlap;
+        ball.y -= ny * overlap;
+        float dot = ball.vx * nx + ball.vy * ny;
+        ball.vx -= 2 * dot * nx;
+        ball.vy -= 2 * dot * ny;
+        ball.vx *= BOUNCE_DAMPING;
+        ball.vy *= BOUNCE_DAMPING;
+      }
 
-  float dx = ball.x - CIRCLE_CENTER_X;
-  float dy = ball.y - CIRCLE_CENTER_Y;
-  float dist = sqrt(dx * dx + dy * dy);
-
-  if (dist + ball.size > CIRCLE_RADIUS) {
-    float overlap = (dist + ball.size) - CIRCLE_RADIUS;
-    float nx = dx / dist;
-    float ny = dy / dist;
-
-    ball.x -= nx * overlap;
-    ball.y -= ny * overlap;
-
-    float dot = ball.vx * nx + ball.vy * ny;
-    ball.vx -= 2 * dot * nx;
-    ball.vy -= 2 * dot * ny;
-
-    ball.vx *= BOUNCE_DAMPING;
-    ball.vy *= BOUNCE_DAMPING;
+      // Randomly trigger despawn
+      if (random(10000) < 50) { // ~0.05% chance per frame
+        ball.state = DESPAWNING;
+        ball.stateStartTime = now;
+        ball.targetSize = ball.size;
+      }
+      break;
   }
 
-  for (int j = i + 1; j < NUM_BALLS; j++) {
-    checkCollision(i, j);
+case DESPAWNING: {
+  ball.size -= 0.5;
+  if (ball.size <= 0) {
+    // Teleport and start spawning
+    ball.x = random(CIRCLE_CENTER_X - CIRCLE_RADIUS + 10, CIRCLE_CENTER_X + CIRCLE_RADIUS - 10);
+    ball.y = random(CIRCLE_CENTER_Y - CIRCLE_RADIUS + 10, CIRCLE_CENTER_Y + CIRCLE_RADIUS - 10);
+    ball.vx = random(-30, 30) / 10.0;
+    ball.vy = random(-20, 5) / 10.0;
+    ball.state = SPAWNING;
+    ball.stateStartTime = now;
+    ball.size = 0;
+  }
+  break;
+}
+
+    case SPAWNING:{
+      ball.size += 0.5;
+      if (ball.size >= ball.targetSize) {
+        ball.size = ball.targetSize;
+        ball.state = ACTIVE;
+      }
+      break;
+  }
+  }
+
+  // Collision detection can still run if desired
+  if (ball.state == ACTIVE) {
+    for (int j = i + 1; j < NUM_BALLS; j++) {
+      if (balls[j].state == ACTIVE) {
+        checkCollision(i, j);
+      }
+    }
   }
 }
 
