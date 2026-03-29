@@ -106,7 +106,7 @@ void setup() {
     // --------------------------------------------------------
     PumpEvent evt;
     if (schedulerCheckEvent(CONFIG, evt)) {
-        runPumpEvent(evt);
+        runPumpEvent(evt, CONFIG);
     }
 
     // --------------------------------------------------------

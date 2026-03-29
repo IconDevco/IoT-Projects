@@ -31,13 +31,13 @@ void pumpOff(int pin) {
 // ------------------------------------------------------------
 // Run a pump event for X minutes
 // ------------------------------------------------------------
-void runPumpEvent(const PumpEvent &evt) {
+void runPumpEvent(const PumpEvent &evt, const SystemConfig &config) {
     Serial.printf("Running pump %d for %d minutes...\n",
                   evt.pump_id, evt.run_minutes);
 
     // Find pump pin
     int pin = -1;
-    for (auto &p : CONFIG.pumps) {
+    for (auto &p : config.pumps) {
         if (p.id == evt.pump_id) {
             pin = p.pin;
             break;
