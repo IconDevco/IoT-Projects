@@ -106,7 +106,7 @@ void loop() {
   updateGravityFromMPU();
 
   memset(frameBuffer, 0, sizeof(frameBuffer));
-  drawBoundaryCircle();
+
 
   for (int i = 0; i < NUM_BALLS; i++) {
     updateBall(i);
@@ -299,14 +299,3 @@ void drawBallToBuffer(int i) {
   }
 }
 
-void drawBoundaryCircle() {
-  return;
-  for (int angle = 0; angle < 360; angle++) {
-    float rad = radians(angle);
-    int x = CIRCLE_CENTER_X + cos(rad) * CIRCLE_RADIUS;
-    int y = CIRCLE_CENTER_Y + sin(rad) * CIRCLE_RADIUS;
-    if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
-      frameBuffer[y * SCREEN_WIDTH + x] = ST77XX_WHITE;
-    }
-  }
-}
